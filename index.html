@@ -40,12 +40,7 @@ button {
 .lamp-off { background: #333; color: #fff; }
 .lamp-on  { background: #f1c40f; color: #000; }
 
-#status {
-  margin: 10px;
-  font-size: 22px;
-  font-weight: bold;
-}
-
+#status { margin: 10px; font-size: 22px; font-weight: bold; }
 .counter { margin-top: 10px; font-size: 16px; }
 .list { margin-top: 15px; text-align: left; font-size: 14px; }
 .item { padding: 5px; border-bottom: 1px solid #444; }
@@ -92,9 +87,12 @@ button {
 
 #reader { width: 100%; border-radius: 10px; overflow: hidden; background: #000; }
 
-.modal-box #lampBtn { width: 100%; margin-top: 10px; }
+.row { display: flex; gap: 8px; margin-top: 10px; }
+.row button { flex: 1; width: auto; margin: 0; padding: 14px 6px; font-size: 16px; }
+.row button[hidden] { display: none; }
 
-#camMsg { margin-top: 8px; font-size: 14px; color: #bbb; min-height: 18px; }
+#camMsg  { margin-top: 8px; font-size: 14px; color: #f39c12; min-height: 18px; }
+#camInfo { margin-top: 4px; font-size: 12px; color: #999; word-break: break-word; min-height: 16px; }
 </style>
 </head>
 
@@ -125,8 +123,12 @@ Dubletter: <span id="dups">0</span>
       <button class="close" onclick="stopScanner()" aria-label="Stäng kameran">✕</button>
     </div>
     <div id="reader"></div>
-    <button id="lampBtn" class="lamp-off" onclick="toggleLampa()" hidden>🔦 Lampan PÅ</button>
+    <div class="row">
+      <button id="switchBtn" class="lamp-off" onclick="switchCamera()">🔄 Byt kamera</button>
+      <button id="lampBtn" class="lamp-off" onclick="toggleLampa()" hidden>🔦 Lampan PÅ</button>
+    </div>
     <div id="camMsg"></div>
+    <div id="camInfo"></div>
   </div>
 </div>
 
@@ -138,6 +140,12 @@ let dupCount = 0;
 let scanner = null;
 let torchOn = false;
 let scanHandled = false;
+
+// Kameraval
+let cameras = [];
+let camIndex = -1;          // -1 = webbläsarens standardval (bakre kamera)
+let tries = 0;
+let lastInfoUpdate = 0;
 
 // ------------------- SCAN LOGIK -------------------
 
@@ -191,39 +199,79 @@ function updateUI(value, isDup) {
 
 function openModal()  { document.getElementById("camModal").hidden = false; }
 function closeModal() { document.getElementById("camModal").hidden = true; }
-
-function setMsg(text) { document.getElementById("camMsg").textContent = text || ""; }
+function setMsg(text)  { document.getElementById("camMsg").textContent = text || ""; }
+function setInfo(text) { document.getElementById("camInfo").textContent = text || ""; }
 
 async function startScanner() {
   if (scanner) return;
 
   scanHandled = false;
-  torchOn = false;
+  camIndex = -1;
   setMsg("");
-  resetLampBtn();
-  document.getElementById("lampBtn").hidden = true;
+  setInfo("");
   openModal();
 
   scanner = new Html5Qrcode("reader");
 
   try {
-    await scanner.start(
-      { facingMode: "environment" },
-      {
-        fps: 10,
-        qrbox: (w, h) => {
-          const s = Math.floor(Math.min(w, h) * 0.7);
-          return { width: s, height: s };
-        }
-      },
-      onScanSuccess,
-      () => {}
-    );
-    setupLamp();
+    await startCamera({ facingMode: "environment" });
   } catch (err) {
     scanner = null;
     closeModal();
     alert("Kunde inte starta kamera: " + err);
+  }
+}
+
+// Ingen qrbox anges, så hela bilden söks igenom efter QR-koder
+async function startCamera(cameraConfig) {
+  tries = 0;
+  torchOn = false;
+  resetLampBtn();
+  document.getElementById("lampBtn").hidden = true;
+  setMsg("");
+
+  await scanner.start(cameraConfig, { fps: 10 }, onScanSuccess, onScanFrame);
+
+  setupLamp();
+  showCameraInfo();
+}
+
+// Anropas varje gång en bildruta analyserats utan träff. Visar att sökningen körs.
+function onScanFrame() {
+  tries++;
+  const now = Date.now();
+  if (now - lastInfoUpdate > 500) {
+    lastInfoUpdate = now;
+    showCameraInfo();
+  }
+}
+
+function showCameraInfo() {
+  const track = getVideoTrack();
+  if (!track) return;
+  const s = track.getSettings ? track.getSettings() : {};
+  const res = s.width && s.height ? s.width + "x" + s.height : "?";
+  const which = camIndex >= 0 ? " (" + (camIndex + 1) + "/" + cameras.length + ")" : "";
+  setInfo("Kamera" + which + ": " + (track.label || "okänd") + " | " + res + " | sökningar: " + tries);
+}
+
+async function switchCamera() {
+  if (!scanner) return;
+  try {
+    if (!cameras.length) {
+      const all = await Html5Qrcode.getCameras();
+      const back = all.filter(c => /back|rear|bak|environment/i.test(c.label));
+      cameras = back.length ? back : all;
+    }
+    if (cameras.length < 2) {
+      setMsg("Hittade bara en kamera.");
+      return;
+    }
+    camIndex = (camIndex + 1) % cameras.length;
+    await scanner.stop();
+    await startCamera(cameras[camIndex].id);
+  } catch (err) {
+    setMsg("Kunde inte byta kamera: " + err);
   }
 }
 
@@ -249,7 +297,7 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") stopScanner();
 });
 
-// ------------------- LAMPA (använder samma kameraström som skannern) -------------------
+// ------------------- LAMPA (samma kameraström som skannern) -------------------
 
 function getVideoTrack() {
   const video = document.querySelector("#reader video");
@@ -270,9 +318,10 @@ function setupLamp() {
 
   if (caps.torch) {
     btn.hidden = false;
+    setMsg("");
   } else {
     btn.hidden = true;
-    setMsg("Ficklampa stöds inte av kameran i den här webbläsaren.");
+    setMsg("Ingen ficklampa på den här kameran. Prova Byt kamera.");
   }
 }
 
