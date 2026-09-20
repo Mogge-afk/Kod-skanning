@@ -37,8 +37,6 @@ button {
 }
 
 .ok { background: #2ecc71; color: #000; }
-.warn { background: #f39c12; color: #000; }
-.dup { background: #e74c3c; }
 .lamp-off { background: #333; color: #fff; }
 .lamp-on  { background: #f1c40f; color: #000; }
 
@@ -48,21 +46,55 @@ button {
   font-weight: bold;
 }
 
-.counter {
-  margin-top: 10px;
-  font-size: 16px;
+.counter { margin-top: 10px; font-size: 16px; }
+.list { margin-top: 15px; text-align: left; font-size: 14px; }
+.item { padding: 5px; border-bottom: 1px solid #444; }
+
+/* ------------------- POPUP ------------------- */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  z-index: 100;
+}
+.modal[hidden] { display: none; }
+
+.modal-box {
+  width: 100%;
+  max-width: 420px;
+  background: #1c1c1c;
+  border: 1px solid #333;
+  border-radius: 14px;
+  padding: 12px;
 }
 
-.list {
-  margin-top: 15px;
-  text-align: left;
-  font-size: 14px;
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.modal-head strong { font-size: 18px; }
+
+.modal-head .close {
+  width: 44px;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  font-size: 20px;
+  background: #333;
+  color: #fff;
 }
 
-.item {
-  padding: 5px;
-  border-bottom: 1px solid #444;
-}
+#reader { width: 100%; border-radius: 10px; overflow: hidden; background: #000; }
+
+.modal-box #lampBtn { width: 100%; margin-top: 10px; }
+
+#camMsg { margin-top: 8px; font-size: 14px; color: #bbb; min-height: 18px; }
 </style>
 </head>
 
@@ -75,9 +107,6 @@ button {
 <button onclick="scan()" class="ok">Scan manuellt</button>
 <button onclick="fakeScan()">Test Scan</button>
 <button onclick="startScanner()">Starta kamera</button>
-<button id="lampBtn" class="lamp-off" onclick="toggleLampa()">🔦 Lampan PÅ</button>
-
-<div id="reader" style="width:100%; margin-top:10px;"></div>
 
 <div id="status">Väntar...</div>
 
@@ -88,67 +117,27 @@ Dubletter: <span id="dups">0</span>
 
 <div class="list" id="list"></div>
 
+<!-- Kamera-popup -->
+<div id="camModal" class="modal" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <strong>Skanna QR</strong>
+      <button class="close" onclick="stopScanner()" aria-label="Stäng kameran">✕</button>
+    </div>
+    <div id="reader"></div>
+    <button id="lampBtn" class="lamp-off" onclick="toggleLampa()" hidden>🔦 Lampan PÅ</button>
+    <div id="camMsg"></div>
+  </div>
+</div>
+
 <script src="https://unpkg.com/html5-qrcode"></script>
 
 <script>
 let scans = [];
 let dupCount = 0;
 let scanner = null;
-
-// ------------------- LAMPA -------------------
-
 let torchOn = false;
-let currentTrack = null;
-
-async function toggleLampa() {
-  const btn = document.getElementById("lampBtn");
-  try {
-    // Hämta kameratrack från en aktiv ström — öppna INTE en ny
-    if (!currentTrack) {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const hasCamera = devices.some(d => d.kind === "videoinput");
-      if (!hasCamera) { alert("Ingen kamera hittad."); return; }
-
-      // Starta en tillfällig ström bara för lampan, utan att låsa längre än nödvändigt
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" }
-      });
-      currentTrack = stream.getVideoTracks()[0];
-
-      const capabilities = currentTrack.getCapabilities();
-      if (!capabilities.torch) {
-        // Stöds inte — släpp strömmen direkt så kameran inte låses
-        currentTrack.stop();
-        currentTrack = null;
-        alert("Din enhet stöder inte ficklampa via webbläsaren.");
-        return;
-      }
-    }
-
-    torchOn = !torchOn;
-    await currentTrack.applyConstraints({
-      advanced: [{ torch: torchOn }]
-    });
-
-    btn.textContent = torchOn ? "🔦 Lampan AV" : "🔦 Lampan PÅ";
-    btn.className = torchOn ? "lamp-on" : "lamp-off";
-
-  } catch (err) {
-    // Släpp strömmen om något gick fel
-    if (currentTrack) { currentTrack.stop(); currentTrack = null; }
-    alert("Kunde inte komma åt lampan: " + err);
-  }
-}
-
-// Stäng av lampan och släpp kameraströmmen när sidan stängs
-window.addEventListener("beforeunload", () => {
-  if (currentTrack) {
-    if (torchOn) {
-      currentTrack.applyConstraints({ advanced: [{ torch: false }] }).catch(() => {});
-    }
-    currentTrack.stop();
-  }
-});
+let scanHandled = false;
 
 // ------------------- SCAN LOGIK -------------------
 
@@ -160,8 +149,7 @@ function scan() {
 }
 
 function fakeScan() {
-  let value = "ID-" + Math.floor(Math.random() * 5);
-  processScan(value);
+  processScan("ID-" + Math.floor(Math.random() * 5));
 }
 
 function processScan(value) {
@@ -196,29 +184,113 @@ function updateUI(value, isDup) {
   item.innerText = new Date().toLocaleTimeString() + " - " + value + (isDup ? " (DUP)" : "");
   list.prepend(item);
 
-  if (list.children.length > 10) {
-    list.removeChild(list.lastChild);
-  }
+  if (list.children.length > 10) list.removeChild(list.lastChild);
 }
 
-// ------------------- KAMERA -------------------
+// ------------------- KAMERA I POPUP -------------------
 
-function startScanner() {
+function openModal()  { document.getElementById("camModal").hidden = false; }
+function closeModal() { document.getElementById("camModal").hidden = true; }
+
+function setMsg(text) { document.getElementById("camMsg").textContent = text || ""; }
+
+async function startScanner() {
   if (scanner) return;
+
+  scanHandled = false;
+  torchOn = false;
+  setMsg("");
+  resetLampBtn();
+  document.getElementById("lampBtn").hidden = true;
+  openModal();
 
   scanner = new Html5Qrcode("reader");
 
-  scanner.start(
-    { facingMode: "environment" },
-    { fps: 10, qrbox: 250 },
-    (decodedText) => {
-      processScan(decodedText);
-      scanner.stop().then(() => { scanner = null; });
-    },
-    (error) => {}
-  ).catch(err => {
+  try {
+    await scanner.start(
+      { facingMode: "environment" },
+      {
+        fps: 10,
+        qrbox: (w, h) => {
+          const s = Math.floor(Math.min(w, h) * 0.7);
+          return { width: s, height: s };
+        }
+      },
+      onScanSuccess,
+      () => {}
+    );
+    setupLamp();
+  } catch (err) {
+    scanner = null;
+    closeModal();
     alert("Kunde inte starta kamera: " + err);
-  });
+  }
+}
+
+function onScanSuccess(decodedText) {
+  if (scanHandled) return;
+  scanHandled = true;
+  processScan(decodedText);
+  stopScanner();
+}
+
+async function stopScanner() {
+  if (scanner) {
+    const s = scanner;
+    scanner = null;
+    try { await s.stop(); } catch (e) {}
+    try { s.clear(); } catch (e) {}
+  }
+  torchOn = false;
+  closeModal();
+}
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") stopScanner();
+});
+
+// ------------------- LAMPA (använder samma kameraström som skannern) -------------------
+
+function getVideoTrack() {
+  const video = document.querySelector("#reader video");
+  const stream = video && video.srcObject;
+  return stream ? stream.getVideoTracks()[0] : null;
+}
+
+function resetLampBtn() {
+  const btn = document.getElementById("lampBtn");
+  btn.textContent = "🔦 Lampan PÅ";
+  btn.className = "lamp-off";
+}
+
+function setupLamp() {
+  const btn = document.getElementById("lampBtn");
+  const track = getVideoTrack();
+  const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+
+  if (caps.torch) {
+    btn.hidden = false;
+  } else {
+    btn.hidden = true;
+    setMsg("Ficklampa stöds inte av kameran i den här webbläsaren.");
+  }
+}
+
+async function toggleLampa() {
+  const track = getVideoTrack();
+  if (!track) return;
+
+  const btn = document.getElementById("lampBtn");
+  const next = !torchOn;
+
+  try {
+    await track.applyConstraints({ advanced: [{ torch: next }] });
+    torchOn = next;
+    btn.textContent = torchOn ? "🔦 Lampan AV" : "🔦 Lampan PÅ";
+    btn.className = torchOn ? "lamp-on" : "lamp-off";
+  } catch (err) {
+    setMsg("Kunde inte ändra lampan: " + err);
+  }
 }
 
 // ------------------- LJUD + VIBRATION -------------------
