@@ -146,6 +146,7 @@ let cameras = [];
 let camIndex = -1;          // -1 = webbläsarens standardval (bakre kamera)
 let tries = 0;
 let lastInfoUpdate = 0;
+let switching = false;
 
 // ------------------- SCAN LOGIK -------------------
 
@@ -222,6 +223,28 @@ async function startScanner() {
   }
 }
 
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Släpper kameran helt och skapar en ny skanner-instans
+async function resetScanner() {
+  if (scanner) {
+    try { await scanner.stop(); } catch (e) {}
+    try { scanner.clear(); } catch (e) {}
+  }
+  scanner = new Html5Qrcode("reader");
+  await sleep(400);
+}
+
+// Standard är ofta bara 640x480, vilket är för lite för att läsa små koder.
+// Vi ber om högre upplösning (webbläsaren väljer närmast möjliga).
+function videoConstraintsFor(cameraConfig) {
+  const base = { width: { ideal: 1280 }, height: { ideal: 720 } };
+  if (typeof cameraConfig === "string") {
+    return Object.assign({ deviceId: { exact: cameraConfig } }, base);
+  }
+  return Object.assign({ facingMode: "environment" }, base);
+}
+
 // Ingen qrbox anges, så hela bilden söks igenom efter QR-koder
 async function startCamera(cameraConfig) {
   tries = 0;
@@ -230,7 +253,18 @@ async function startCamera(cameraConfig) {
   document.getElementById("lampBtn").hidden = true;
   setMsg("");
 
-  await scanner.start(cameraConfig, { fps: 10 }, onScanSuccess, onScanFrame);
+  try {
+    await scanner.start(
+      cameraConfig,
+      { fps: 10, videoConstraints: videoConstraintsFor(cameraConfig) },
+      onScanSuccess,
+      onScanFrame
+    );
+  } catch (err) {
+    // Reserv: försök igen utan de högre kraven
+    await resetScanner();
+    await scanner.start(cameraConfig, { fps: 10 }, onScanSuccess, onScanFrame);
+  }
 
   setupLamp();
   showCameraInfo();
@@ -252,26 +286,54 @@ function showCameraInfo() {
   const s = track.getSettings ? track.getSettings() : {};
   const res = s.width && s.height ? s.width + "x" + s.height : "?";
   const which = camIndex >= 0 ? " (" + (camIndex + 1) + "/" + cameras.length + ")" : "";
-  setInfo("Kamera" + which + ": " + (track.label || "okänd") + " | " + res + " | sökningar: " + tries);
+  const focus = s.focusMode ? " | fokus: " + s.focusMode : "";
+  setInfo("Kamera" + which + ": " + (track.label || "okänd") + " | " + res + focus + " | sökningar: " + tries);
 }
 
 async function switchCamera() {
-  if (!scanner) return;
+  if (!scanner || switching) return;
+  switching = true;
   try {
     if (!cameras.length) {
       const all = await Html5Qrcode.getCameras();
       const back = all.filter(c => /back|rear|bak|environment/i.test(c.label));
       cameras = back.length ? back : all;
+      const current = getVideoTrack();
+      camIndex = current ? cameras.findIndex(c => c.label === current.label) : -1;
     }
     if (cameras.length < 2) {
       setMsg("Hittade bara en kamera.");
       return;
     }
-    camIndex = (camIndex + 1) % cameras.length;
-    await scanner.stop();
-    await startCamera(cameras[camIndex].id);
+
+    // Släpp nuvarande kamera helt innan nästa öppnas
+    await resetScanner();
+
+    const skipped = [];
+    for (let i = 1; i <= cameras.length; i++) {
+      const idx = (camIndex + i + cameras.length) % cameras.length;
+      try {
+        await startCamera(cameras[idx].id);
+        camIndex = idx;
+        showCameraInfo();
+        const lampNote = document.getElementById("lampBtn").hidden ? "Ingen ficklampa på den här kameran. " : "";
+        const skipNote = skipped.length ? "Kamera " + skipped.join(", ") + " gick inte att öppna." : "";
+        setMsg(lampNote + skipNote);
+        return;
+      } catch (err) {
+        skipped.push(idx + 1);
+        await resetScanner();
+      }
+    }
+
+    // Ingen kamera gick att öppna, gå tillbaka till standardkameran
+    await startCamera({ facingMode: "environment" });
+    camIndex = -1;
+    setMsg("Ingen annan kamera gick att öppna.");
   } catch (err) {
     setMsg("Kunde inte byta kamera: " + err);
+  } finally {
+    switching = false;
   }
 }
 
