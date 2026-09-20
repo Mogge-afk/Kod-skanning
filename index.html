@@ -103,18 +103,26 @@ let currentTrack = null;
 async function toggleLampa() {
   const btn = document.getElementById("lampBtn");
   try {
-    // Om kameran redan kör via html5-qrcode, försök hämta spåret därifrån
+    // Hämta kameratrack från en aktiv ström — öppna INTE en ny
     if (!currentTrack) {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const hasCamera = devices.some(d => d.kind === "videoinput");
+      if (!hasCamera) { alert("Ingen kamera hittad."); return; }
+
+      // Starta en tillfällig ström bara för lampan, utan att låsa längre än nödvändigt
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment" }
       });
       currentTrack = stream.getVideoTracks()[0];
-    }
 
-    const capabilities = currentTrack.getCapabilities();
-    if (!capabilities.torch) {
-      alert("Din enhet stöder inte ficklampa via webbläsaren.");
-      return;
+      const capabilities = currentTrack.getCapabilities();
+      if (!capabilities.torch) {
+        // Stöds inte — släpp strömmen direkt så kameran inte låses
+        currentTrack.stop();
+        currentTrack = null;
+        alert("Din enhet stöder inte ficklampa via webbläsaren.");
+        return;
+      }
     }
 
     torchOn = !torchOn;
@@ -126,6 +134,8 @@ async function toggleLampa() {
     btn.className = torchOn ? "lamp-on" : "lamp-off";
 
   } catch (err) {
+    // Släpp strömmen om något gick fel
+    if (currentTrack) { currentTrack.stop(); currentTrack = null; }
     alert("Kunde inte komma åt lampan: " + err);
   }
 }
@@ -182,6 +192,20 @@ function updateUI(value, isDup) {
 
   let list = document.getElementById("list");
   let item = document.createElement("div");
+  item.className = "item";
+  item.innerText = new Date().toLocaleTimeString() + " - " + value + (isDup ? " (DUP)" : "");
+  list.prepend(item);
+
+  if (list.children.length > 10) {
+    list.removeChild(list.lastChild);
+  }
+}
+
+// ------------------- KAMERA -------------------
+
+function startScanner() {
+  if (scanner) return;
+
   scanner = new Html5Qrcode("reader");
 
   scanner.start(
