@@ -33,11 +33,14 @@ button {
   margin: 5px 0;
   border-radius: 10px;
   border: none;
+  cursor: pointer;
 }
 
-.ok { background: #2ecc71; }
-.warn { background: #f39c12; }
+.ok { background: #2ecc71; color: #000; }
+.warn { background: #f39c12; color: #000; }
 .dup { background: #e74c3c; }
+.lamp-off { background: #333; color: #fff; }
+.lamp-on  { background: #f1c40f; color: #000; }
 
 #status {
   margin: 10px;
@@ -72,6 +75,7 @@ button {
 <button onclick="scan()" class="ok">Scan manuellt</button>
 <button onclick="fakeScan()">Test Scan</button>
 <button onclick="startScanner()">Starta kamera</button>
+<button id="lampBtn" class="lamp-off" onclick="toggleLampa()">🔦 Lampan PÅ</button>
 
 <div id="reader" style="width:100%; margin-top:10px;"></div>
 
@@ -91,6 +95,51 @@ let scans = [];
 let dupCount = 0;
 let scanner = null;
 
+// ------------------- LAMPA -------------------
+
+let torchOn = false;
+let currentTrack = null;
+
+async function toggleLampa() {
+  const btn = document.getElementById("lampBtn");
+  try {
+    // Om kameran redan kör via html5-qrcode, försök hämta spåret därifrån
+    if (!currentTrack) {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" }
+      });
+      currentTrack = stream.getVideoTracks()[0];
+    }
+
+    const capabilities = currentTrack.getCapabilities();
+    if (!capabilities.torch) {
+      alert("Din enhet stöder inte ficklampa via webbläsaren.");
+      return;
+    }
+
+    torchOn = !torchOn;
+    await currentTrack.applyConstraints({
+      advanced: [{ torch: torchOn }]
+    });
+
+    btn.textContent = torchOn ? "🔦 Lampan AV" : "🔦 Lampan PÅ";
+    btn.className = torchOn ? "lamp-on" : "lamp-off";
+
+  } catch (err) {
+    alert("Kunde inte komma åt lampan: " + err);
+  }
+}
+
+// Stäng av lampan och släpp kameraströmmen när sidan stängs
+window.addEventListener("beforeunload", () => {
+  if (currentTrack) {
+    if (torchOn) {
+      currentTrack.applyConstraints({ advanced: [{ torch: false }] }).catch(() => {});
+    }
+    currentTrack.stop();
+  }
+});
+
 // ------------------- SCAN LOGIK -------------------
 
 function scan() {
@@ -101,13 +150,12 @@ function scan() {
 }
 
 function fakeScan() {
-  let value = "ID-" + Math.floor(Math.random()*5);
+  let value = "ID-" + Math.floor(Math.random() * 5);
   processScan(value);
 }
 
 function processScan(value) {
   let status = document.getElementById("status");
-
   let exists = scans.includes(value);
 
   if (exists) {
@@ -133,24 +181,7 @@ function updateUI(value, isDup) {
   document.getElementById("dups").innerText = dupCount;
 
   let list = document.getElementById("list");
-
   let item = document.createElement("div");
-  item.className = "item";
-  item.innerText =
-    new Date().toLocaleTimeString() + " - " + value + (isDup ? " (DUP)" : "");
-
-  list.prepend(item);
-
-  if (list.children.length > 10) {
-    list.removeChild(list.lastChild);
-  }
-}
-
-// ------------------- KAMERA -------------------
-
-function startScanner() {
-  if (scanner) return;
-
   scanner = new Html5Qrcode("reader");
 
   scanner.start(
@@ -158,10 +189,7 @@ function startScanner() {
     { fps: 10, qrbox: 250 },
     (decodedText) => {
       processScan(decodedText);
-
-      // Stoppa efter scan (demo-läge)
-      scanner.stop();
-      scanner = null;
+      scanner.stop().then(() => { scanner = null; });
     },
     (error) => {}
   ).catch(err => {
@@ -169,7 +197,7 @@ function startScanner() {
   });
 }
 
-// ------------------- Ljud + vibration -------------------
+// ------------------- LJUD + VIBRATION -------------------
 
 function beep(freq, duration) {
   let ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -181,9 +209,7 @@ function beep(freq, duration) {
 }
 
 function vibrate() {
-  if (navigator.vibrate) {
-    navigator.vibrate(200);
-  }
+  if (navigator.vibrate) navigator.vibrate(200);
 }
 </script>
 
